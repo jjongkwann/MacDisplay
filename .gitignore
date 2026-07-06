@@ -1,0 +1,8 @@
+# build artifacts
+macdisplay
+build/
+MacDisplay.app/
+
+# local
+.claude/
+.DS_Store
