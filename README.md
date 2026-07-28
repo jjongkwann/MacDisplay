@@ -46,9 +46,11 @@ Exit codes: `0` ok · `1` operation failed · `2` refused (guard tripped, or bui
 display — device name and id, with a checkmark when the display is on — rebuilt live from
 `CGSGetDisplayList` every time the menu opens. Click a row to toggle that display off/on: the
 same disconnect/reconnect and the same last-active-display guard as the CLI. Phantom rows (an
-offline display never seen online, so with no real name) are hidden; the only remaining active
-display is greyed out so you can't black everything out; and a failed toggle pops an alert with
-the recovery ladder below.
+offline display never seen online, so with no real name) are hidden, as are ghost rows (a stale
+id left over from a sleep/replug re-enumeration, with no hardware behind it — identified by
+zeroed vendor/model/serial rather than by name, so a stale cached name can't let one slip
+through); the only remaining active display is greyed out so you can't black everything out; and
+a failed toggle pops an alert with the recovery ladder below.
 
 ```sh
 make app

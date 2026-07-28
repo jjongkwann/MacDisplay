@@ -41,6 +41,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let online  = CGDisplayIsOnline(id) != 0
             let builtin = CGDisplayIsBuiltin(id) != 0
             let name    = displayName(id, names, cache)
+            // ghosts: stale CGSGetDisplayList ids with no hardware — via the id-keyed name cache
+            // they'd render as duplicates of the re-enumerated display and error on click.
+            if isGhost(id) { continue }
             // (a) hide phantoms: offline, no cached real name, and not the built-in panel.
             if !online && !builtin && name == "Display \(id)" { continue }
 

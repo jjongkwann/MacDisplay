@@ -63,13 +63,24 @@ func firstBuiltin(_ ids: [CGDirectDisplayID]) -> CGDirectDisplayID? {
     ids.first { CGDisplayIsBuiltin($0) != 0 }
 }
 
+/// Ghost entry: an id the window server still enumerates after a replug/sleep re-enumeration
+/// but with no hardware behind it. Real displays — even software-disabled ones — retain
+/// vendor/model/serial (verified: an offline built-in keeps 0x610/0xa050); ghosts report all zeros.
+func isGhost(_ id: CGDirectDisplayID) -> Bool {
+    CGDisplayIsOnline(id) == 0
+        && CGDisplayVendorNumber(id) == 0
+        && CGDisplayModelNumber(id) == 0
+        && CGDisplaySerialNumber(id) == 0
+}
+
 // MARK: - last-seen name cache
 // AppKit can only name ONLINE displays, so a disabled one would degrade to "Display 3".
 // We remember id→name whenever a display is seen online (~/Library/Preferences/macdisplay.plist)
 // purely for LABELS and name matching. Unlike DisplayDeck's stale-id bug, the cache never picks
 // a target by itself: every target must still be present in the CURRENT CGSGetDisplayList.
-// ponytail: keyed by display id, which can reshuffle across reboots — worst case a label is
-// stale until the display comes online once; switch to UUID keys if that ever bites.
+// ponytail: keyed by display id, which can reshuffle across reboots — that risk materialized as
+// a duplicate menu row (a ghost id wearing a stale cached name). Ghosts are now filtered by
+// hardware identity (isGhost), so a stale cache entry can still mislabel but can no longer surface a dead id.
 
 let prefs = UserDefaults(suiteName: "macdisplay")
 
@@ -189,6 +200,9 @@ func enableDisplay(_ id: CGDirectDisplayID) -> OpResult {
         let ids = enumerateDisplays(getList)
         guard ids.contains(id) else {
             return OpResult(ok: false, code: 2, message: describeMissing(String(id)))
+        }
+        if isGhost(id) {
+            return OpResult(ok: false, code: 2, message: "Display \(label(id)) is a stale window-server entry with no connected hardware. Replug the display or reboot to clear it.")
         }
         let tag = label(id)
         if CGDisplayIsOnline(id) != 0 {

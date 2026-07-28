@@ -23,7 +23,7 @@ func cmdStatus() -> Int32 {
         let builtin = CGDisplayIsBuiltin(id) != 0
         let online  = CGDisplayIsOnline(id) != 0
         let active  = CGDisplayIsActive(id) != 0
-        let state   = !online ? "disabled" : (active ? "active" : "online")
+        let state   = isGhost(id) ? "ghost" : (!online ? "disabled" : (active ? "active" : "online"))
         let kind    = builtin ? "built-in" : "external"
         let name    = displayName(id, names, cache)
         let isMain  = id == main ? "yes" : ""
