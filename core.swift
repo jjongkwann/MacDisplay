@@ -1,7 +1,8 @@
 // macdisplay — turn the MacBook built-in display off/on while using external monitors.
 //
-// Shared core: private-API symbol loading, display enumeration, the id→name cache, and the
-// disable/enable operations used by BOTH the CLI (main.swift) and the menu bar app (menubar.swift).
+// Shared core: private-API symbol loading, display enumeration, the last-seen name cache, the
+// keep-built-in-off memory, and the disable/enable operations used by BOTH the CLI (main.swift)
+// and the menu bar app (menubar.swift).
 //
 // The display-configuration transaction wrapper (begin / configure / complete-or-cancel,
 // commit .permanently) is adapted from oabdrabo/DisplayDeck (MIT). The private symbols
@@ -18,8 +19,15 @@ import CoreGraphics
 import Foundation
 import AppKit   // NSScreen.localizedName — cheap human-readable names for online displays
 
+/// The one place the version is written; the Makefile reads this line for the app bundle's Info.plist.
+let version = "1.3.0"
+
 // MARK: - exit codes
 // 0 success · 1 operation failed · 2 refused/precondition (guard, built-in absent) · 3 private symbol gone
+
+/// A failure the caller decides how to surface: the CLI prints it and exits with `code`, the
+/// menu bar app shows it. Nothing in this file terminates the process.
+struct DisplayError: Error { let message: String; let code: Int32 }
 
 // MARK: - private SkyLight symbols, resolved at runtime (never at link time)
 
@@ -31,12 +39,12 @@ typealias GetDisplayListFn = @convention(c)
 typealias ConfigureEnabledFn = @convention(c)
     (CGDisplayConfigRef?, CGDirectDisplayID, Bool) -> CGError
 
-func requireSymbol<T>(_ name: String) -> T {
+func requireSymbol<T>(_ name: String) throws -> T {
     guard let h = skylightHandle else {
-        die("Could not load SkyLight private framework at \(skylightPath). A macOS update may have moved it.", 3)
+        throw DisplayError(message: "Could not load SkyLight private framework at \(skylightPath). A macOS update may have moved it.", code: 3)
     }
     guard let sym = dlsym(h, name) else {
-        die("Private symbol \(name) not found — a macOS update likely removed it.", 3)
+        throw DisplayError(message: "Private symbol \(name) not found — a macOS update likely removed it.", code: 3)
     }
     return unsafeBitCast(sym, to: T.self)
 }
@@ -44,17 +52,17 @@ func requireSymbol<T>(_ name: String) -> T {
 // MARK: - small helpers
 
 func eprint(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
-func die(_ msg: String, _ code: Int32) -> Never { eprint(msg); exit(code) }
 func pad(_ s: String, _ n: Int) -> String { s.count >= n ? s : s + String(repeating: " ", count: n - s.count) }
 
 /// All display ids the window server knows about — INCLUDING software-disabled ones,
 /// which the public CGGetOnlineDisplayList / NSScreen APIs omit.
-func enumerateDisplays(_ getList: GetDisplayListFn) -> [CGDirectDisplayID] {
+func enumerateDisplays() throws -> [CGDirectDisplayID] {
+    let getList: GetDisplayListFn = try requireSymbol("CGSGetDisplayList")
     // ponytail: fixed 16-slot cap — a 17th display would silently be dropped; bump if that's ever real.
     var ids = [CGDirectDisplayID](repeating: 0, count: 16)
     var count: UInt32 = 0
     let err = getList(16, &ids, &count)
-    if err != .success { die("CGSGetDisplayList failed (CGError \(err.rawValue)).", 1) }
+    if err != .success { throw DisplayError(message: "CGSGetDisplayList failed (CGError \(err.rawValue)).", code: 1) }
     return Array(ids.prefix(Int(count)))
 }
 
@@ -75,31 +83,88 @@ func isGhost(_ id: CGDirectDisplayID) -> Bool {
 
 // MARK: - last-seen name cache
 // AppKit can only name ONLINE displays, so a disabled one would degrade to "Display 3".
-// We remember id→name whenever a display is seen online (~/Library/Preferences/macdisplay.plist)
-// purely for LABELS and name matching. Unlike DisplayDeck's stale-id bug, the cache never picks
-// a target by itself: every target must still be present in the CURRENT CGSGetDisplayList.
-// ponytail: keyed by display id, which can reshuffle across reboots — that risk materialized as
-// a duplicate menu row (a ghost id wearing a stale cached name). Ghosts are now filtered by
-// hardware identity (isGhost), so a stale cache entry can still mislabel but can no longer surface a dead id.
+// We remember the name whenever a display is seen online (~/Library/Preferences/macdisplay.plist)
+// purely for LABELS. Unlike DisplayDeck's stale-id bug, the cache never picks a target by
+// itself: every target must still be present in the CURRENT CGSGetDisplayList.
+// Keyed by hardware identity, not display id: ids reshuffle across replugs and reboots, while a
+// software-disabled display keeps its vendor/model (verified: an offline built-in keeps 0x610/0xa050).
 
 let prefs = UserDefaults(suiteName: "macdisplay")
 
+/// Serial is left out on purpose: the cached value is a model name, so two panels of the same
+/// model sharing an entry is harmless, and vendor/model is what was verified to survive a disable.
+func hardwareKey(_ id: CGDirectDisplayID) -> String { "\(CGDisplayVendorNumber(id)):\(CGDisplayModelNumber(id))" }
+
 func refreshNameCache() -> [String: String] {
     var cache = prefs?.dictionary(forKey: "names") as? [String: String] ?? [:]
-    for (id, name) in onlineNames() { cache[String(id)] = name }
+    // Migration: entries used to be keyed by display id. Carry over the ones whose id still
+    // names real hardware (a disabled display would otherwise lose its label); drop the rest.
+    let legacy = cache.filter { !$0.key.contains(":") }
+    if !legacy.isEmpty {
+        let ids = (try? enumerateDisplays()) ?? []
+        for (key, name) in legacy {
+            cache[key] = nil
+            if let id = UInt32(key), ids.contains(id), !isGhost(id) { cache[hardwareKey(id)] = name }
+        }
+    }
+    for (id, name) in onlineNames() { cache[hardwareKey(id)] = name }
     prefs?.set(cache, forKey: "names")
     return cache
 }
 
-func displayName(_ id: CGDirectDisplayID, _ online: [CGDirectDisplayID: String], _ cache: [String: String]) -> String {
-    online[id] ?? cache[String(id)] ?? (CGDisplayIsBuiltin(id) != 0 ? "Built-in Display" : "Display \(id)")
+/// The device name: live when online, else last seen for this hardware. nil when it was never
+/// seen online — except the built-in panel, which always gets at least a generic name.
+func displayName(_ id: CGDirectDisplayID, _ online: [CGDirectDisplayID: String], _ cache: [String: String]) -> String? {
+    online[id] ?? cache[hardwareKey(id)] ?? (CGDisplayIsBuiltin(id) != 0 ? "Built-in Display" : nil)
 }
 
-/// "#3 (LG HDR 4K)" — or just "#3" when no real name is known.
+/// "#3 (LG HDR 4K)" — or just "#3" when no name is known.
 func label(_ id: CGDirectDisplayID) -> String {
-    let name = displayName(id, onlineNames(), refreshNameCache())
-    return name == "Display \(id)" ? "#\(id)" : "#\(id) (\(name))"
+    displayName(id, onlineNames(), refreshNameCache()).map { "#\(id) (\($0))" } ?? "#\(id)"
 }
+
+// MARK: - keep-built-in-off memory
+// macOS brings a software-disabled display back on wake, lid open and hotplug, and a reboot or a
+// redock starts with it on. So turning the built-in off remembers which external displays were
+// active at that moment, and turning it on forgets the ones connected then. The menu bar app
+// turns the built-in off whenever a remembered display is active: at the desk it stays off,
+// while an unknown projector or TV never triggers it. Only the built-in is managed this way.
+
+/// Identity of a physical display. The serial keeps two desks with the same monitor model apart,
+/// unless the monitor reports serial 0.
+func displayIdentity(_ id: CGDirectDisplayID) -> String {
+    "\(CGDisplayVendorNumber(id)):\(CGDisplayModelNumber(id)):\(CGDisplaySerialNumber(id))"
+}
+
+/// Real external displays (not the built-in, not ghosts): active ones, or all online ones.
+func externalIdentities(_ ids: [CGDirectDisplayID], activeOnly: Bool) -> Set<String> {
+    Set(ids.filter {
+        CGDisplayIsBuiltin($0) == 0 && !isGhost($0)
+            && (activeOnly ? CGDisplayIsActive($0) != 0 : CGDisplayIsOnline($0) != 0)
+    }.map(displayIdentity))
+}
+
+var keepOffWith: Set<String> {
+    get {
+        // Migration from v1.2.0's single flag: a set flag meant "keep it off here", which is the
+        // external displays active now.
+        if prefs?.object(forKey: "keepBuiltinOff") != nil {
+            let wasSet = prefs?.bool(forKey: "keepBuiltinOff") ?? false
+            prefs?.removeObject(forKey: "keepBuiltinOff")
+            if wasSet {
+                let here = externalIdentities((try? enumerateDisplays()) ?? [], activeOnly: true)
+                prefs?.set(here.union(prefs?.stringArray(forKey: "keepOffWith") ?? []).sorted(), forKey: "keepOffWith")
+            }
+        }
+        return Set(prefs?.stringArray(forKey: "keepOffWith") ?? [])
+    }
+    set { prefs?.set(newValue.sorted(), forKey: "keepOffWith") }
+}
+
+/// The built-in was turned off: keep it off whenever these external displays are active again.
+func rememberKeepOff(_ ids: [CGDirectDisplayID]) { keepOffWith.formUnion(externalIdentities(ids, activeOnly: true)) }
+/// The built-in was asked on: stop turning it off with the external displays connected now.
+func forgetKeepOff(_ ids: [CGDirectDisplayID]) { keepOffWith.subtract(externalIdentities(ids, activeOnly: false)) }
 
 /// Target of off/on/toggle: no argument → the built-in panel; a numeric id → that display,
 /// if currently enumerated. (Membership check doubles as the fresh-id re-derivation.)
@@ -161,15 +226,25 @@ func recoveryLadder() { eprint(recoveryLadderText) }
 
 struct OpResult { let ok: Bool; let code: Int32; let message: String }
 
+func failure(_ error: Error) -> OpResult {
+    let e = error as? DisplayError ?? DisplayError(message: "\(error)", code: 1)
+    return OpResult(ok: false, code: e.code, message: e.message)
+}
+
 /// Software-disconnect a display. Refuses if it is the only ACTIVE display (never black out
 /// everything), then commits the transaction and verifies the change actually took.
 func disableDisplay(_ id: CGDirectDisplayID) -> OpResult {
-    let getList: GetDisplayListFn = requireSymbol("CGSGetDisplayList")
-    let setEnabled: ConfigureEnabledFn = requireSymbol("CGSConfigureDisplayEnabled")
-    let ids = enumerateDisplays(getList)
+    let setEnabled: ConfigureEnabledFn
+    let ids: [CGDirectDisplayID]
+    do {
+        setEnabled = try requireSymbol("CGSConfigureDisplayEnabled")
+        ids = try enumerateDisplays()
+    } catch { return failure(error) }
     let tag = label(id) // capture the name while the display is still online
+    let builtin = CGDisplayIsBuiltin(id) != 0
 
     if CGDisplayIsOnline(id) == 0 {
+        if builtin { rememberKeepOff(ids) }
         return OpResult(ok: true, code: 0, message: "Display \(tag) is already off.")
     }
     // Guard: never disable the last active display.
@@ -184,7 +259,11 @@ func disableDisplay(_ id: CGDirectDisplayID) -> OpResult {
     }
     // Verify the change actually took before reporting success.
     if CGDisplayIsOnline(id) == 0 {
-        return OpResult(ok: true, code: 0, message: "Display \(tag) disabled. Note: it may return after sleep/wake — run `off` again.")
+        if builtin { rememberKeepOff(ids) }
+        let note = builtin
+            ? "While MacDisplay.app runs, it keeps it off whenever these external displays are connected; without the app, run `off` again after sleep/wake."
+            : "Note: it may return after sleep/wake — run `off` again."
+        return OpResult(ok: true, code: 0, message: "Display \(tag) disabled. \(note)")
     }
     return OpResult(ok: false, code: 1, message: "Commit reported success but display \(tag) is still online.")
 }
@@ -192,12 +271,17 @@ func disableDisplay(_ id: CGDirectDisplayID) -> OpResult {
 /// Re-enable a display, re-deriving the id from CGSGetDisplayList before EACH of up to 3
 /// attempts (~400 ms apart) — the whole point of the design (see KEY correctness fact above).
 func enableDisplay(_ id: CGDirectDisplayID) -> OpResult {
-    let getList: GetDisplayListFn = requireSymbol("CGSGetDisplayList")
-    let setEnabled: ConfigureEnabledFn = requireSymbol("CGSConfigureDisplayEnabled")
+    // Asking for on forgets the keep-off memory for the displays connected now, even if the
+    // enable then fails, so a later lid open or replug (the recovery ladder) is not undone by the
+    // menu bar app.
+    if CGDisplayIsBuiltin(id) != 0, let ids = try? enumerateDisplays() { forgetKeepOff(ids) }
+    let setEnabled: ConfigureEnabledFn
+    do { setEnabled = try requireSymbol("CGSConfigureDisplayEnabled") } catch { return failure(error) }
 
     for attempt in 1...3 {
         // Re-derive the id from CGSGetDisplayList EVERY attempt — never reuse a stale integer.
-        let ids = enumerateDisplays(getList)
+        let ids: [CGDirectDisplayID]
+        do { ids = try enumerateDisplays() } catch { return failure(error) }
         guard ids.contains(id) else {
             return OpResult(ok: false, code: 2, message: describeMissing(String(id)))
         }

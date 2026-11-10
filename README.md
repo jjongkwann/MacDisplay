@@ -1,22 +1,32 @@
 # macdisplay
 
-A tiny CLI to turn the MacBook **built-in display off/on** while you work on external
-monitors — keep the lid open (Touch ID, camera, cooling) but leave the internal panel dark,
-and bring it back instantly.
+A tiny CLI and menu bar app to turn the MacBook **built-in display off/on** while you work on
+external monitors — keep the lid open (Touch ID, camera, cooling) but leave the internal panel
+dark, and bring it back instantly.
 
-Apple Silicon, macOS 13+. Verified on an M1 Max, macOS 26.5.1 (Tahoe).
+Apple Silicon, macOS 13+ (the build targets 13.0). Tested on an M1 Max: off/on on macOS 26.5.1
+(Tahoe), `status` and the build also on macOS 27.2.1.
 
 ## Build
 
 ```sh
-make cli    # → ./macdisplay        (the CLI)
-make app    # → ./MacDisplay.app    (the menu bar app)
-make all    # both
+make cli      # → ./macdisplay        (the CLI)
+make app      # → ./MacDisplay.app    (the menu bar app, with the CLI inside it)
+make all      # both
+make install  # → /Applications/MacDisplay.app   (make install APPDIR=~/Applications to change)
 ```
 
 Plain `swiftc` + a `Makefile` — no Xcode project, no SwiftPM, no external dependencies. The
 source is three files: `core.swift` (shared logic), `main.swift` (CLI), `menubar.swift` (menu
 bar app). Frameworks (CoreGraphics, AppKit, Foundation) are auto-linked from the `import`s.
+The app icon is built from `assets/AppIcon.png` with `sips` and `iconutil`, and the bundle is
+ad-hoc signed; none of it is notarized, so this is for building on your own Mac.
+
+Run the app from the installed copy rather than from the build folder: `make app` and
+`make clean` replace or delete `./MacDisplay.app`. After installing over a running copy, quit
+and reopen it to get the new version. The installed bundle also carries the CLI at
+`/Applications/MacDisplay.app/Contents/MacOS/macdisplay`; symlink it onto your `PATH` if you
+want it there.
 
 ## Usage
 
@@ -25,11 +35,13 @@ bar app). Frameworks (CoreGraphics, AppKit, Foundation) are auto-linked from the
 ./macdisplay off [id]     # software-disconnect a display (only if another stays active)
 ./macdisplay on [id]      # re-enable a display (retries, then prints recovery steps)
 ./macdisplay toggle [id]  # off or on depending on current state
+./macdisplay --version
 ```
 
 `[id]` is a display id from `status` (externals work too); omit it to target the built-in.
 You don't need to memorize ids: offline displays are labeled in `status` with the device
-name they had when last seen online (cached in `~/Library/Preferences/macdisplay.plist`).
+name they had when last seen online (cached in `~/Library/Preferences/macdisplay.plist`, by
+vendor and model, so the label survives the id changing on a replug or reboot).
 
 `status` reports the built-in's state, but note: on Apple Silicon a lid-closed built-in can
 stay enumerated in `CGSGetDisplayList` (just offline) rather than dropping out entirely, so
@@ -50,14 +62,45 @@ offline display never seen online, so with no real name) are hidden, as are ghos
 id left over from a sleep/replug re-enumeration, with no hardware behind it — identified by
 zeroed vendor/model/serial rather than by name, so a stale cached name can't let one slip
 through); the only remaining active display is greyed out so you can't black everything out; and
-a failed toggle pops an alert with the recovery ladder below.
+a failed toggle pops an alert with the recovery ladder below. If a private symbol is gone after
+a macOS update, the menu says so instead of listing displays.
 
 ```sh
-make app
-open MacDisplay.app
+make install
+open /Applications/MacDisplay.app
 ```
 
 To launch it automatically at login, add it under **System Settings → General → Login Items**.
+
+## Sleep/wake — keeping the built-in off
+
+macOS re-adds displays on wake, lid open/close, and hotplug, so a disconnected display can
+silently come back after sleep.
+
+- **With the menu bar app running**, MacDisplay remembers which external displays were active
+  when you turned the built-in off (from the menu, the CLI or the hotkey), and turns the
+  built-in off again about 2 seconds after it comes back while one of those displays is active:
+  after sleep/wake, a lid open, a redock, or a login at the desk. Turning the built-in on
+  forgets the external displays connected at that moment, so "on" at the desk keeps it on
+  there. Undocked, or plugged into a display you never turned it off with (a projector, a TV),
+  nothing happens. Displays are told apart by vendor, model and serial; two monitors of the
+  same model that report no serial count as one.
+- If the panel came back after 3 attempts to turn it off within a minute, the app stops, forgets
+  the displays connected then and tells you.
+- **The CLI alone** is a one-shot command: nothing re-asserts the state, just run `off` again.
+- External displays are never re-asserted, by either.
+
+This part has not been tested across a real sleep/wake cycle yet; see "If the built-in gets
+stuck off" for the way back, and **Quit MacDisplay** stops it.
+
+## Hotkey
+
+`karabiner/macdisplay.json` is a [Karabiner-Elements](https://karabiner-elements.pqrs.org)
+rule that runs `macdisplay toggle` on **⌃⌥⌘D**. Copy it to
+`~/.config/karabiner/assets/complex_modifications/`, then enable it under Karabiner-Elements →
+Complex Modifications → Add predefined rule. It calls the CLI inside
+`/Applications/MacDisplay.app`, so run `make install` first; edit the key or the path in the
+file to taste.
 
 ## Safety
 
@@ -66,12 +109,6 @@ To launch it automatically at login, add it under **System Settings → General 
 - `off` refuses gracefully if the built-in is physically absent (lid closed).
 - `on` re-derives the display id fresh before each attempt and retries up to 3× (~400 ms
   apart). This avoids the classic re-enable bug (see caveats).
-
-## v1 limitation — may not survive sleep/wake
-
-This is a **one-shot** command, not a daemon. macOS re-adds displays on wake, lid open/close,
-and hotplug, so a disconnect can silently come back after sleep. That's expected in v1 — just
-run `off` again. No background process re-asserts the state.
 
 ## If the built-in gets stuck off
 

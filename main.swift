@@ -2,32 +2,32 @@
 //
 // Top-level dispatch lives here because Swift requires executable top-level code to be in a
 // file named main.swift when compiling multiple files. All real work is in core.swift; the
-// off/on/toggle commands are thin wrappers over disableDisplay/enableDisplay. Behavior,
-// messages, and the 0/1/2/3 exit-code contract are unchanged from the single-file v1.
+// off/on/toggle commands are thin wrappers over disableDisplay/enableDisplay. core.swift reports
+// failures as values; turning them into stderr output and the 0/1/2/3 exit codes happens here.
 
 import CoreGraphics
 import Foundation
 
 // MARK: - commands
 
-func cmdStatus() -> Int32 {
-    let getList: GetDisplayListFn = requireSymbol("CGSGetDisplayList")
-    let ids = enumerateDisplays(getList)
+func cmdStatus() throws -> Int32 {
+    let ids = try enumerateDisplays()
     let main = CGMainDisplayID()
-    let names = onlineNames()
+    let online = onlineNames()
     let cache = refreshNameCache()
+    let names = ids.map { displayName($0, online, cache) ?? "Display \($0)" }
+    let width = names.map(\.count).max().map { max($0, 4) } ?? 4
 
     print("Displays (CGSGetDisplayList) — \(ids.count) found:")
-    print("  \(pad("id", 4)) \(pad("name", 22)) \(pad("kind", 9)) \(pad("state", 9)) main")
-    for id in ids {
+    print("  \(pad("id", 4)) \(pad("name", width)) \(pad("kind", 9)) \(pad("state", 9)) main")
+    for (id, name) in zip(ids, names) {
         let builtin = CGDisplayIsBuiltin(id) != 0
         let online  = CGDisplayIsOnline(id) != 0
         let active  = CGDisplayIsActive(id) != 0
         let state   = isGhost(id) ? "ghost" : (!online ? "disabled" : (active ? "active" : "online"))
         let kind    = builtin ? "built-in" : "external"
-        let name    = displayName(id, names, cache)
         let isMain  = id == main ? "yes" : ""
-        print("  #\(pad(String(id), 3)) \(pad(name, 22)) \(pad(kind, 9)) \(pad(state, 9)) \(isMain)")
+        print("  #\(pad(String(id), 3)) \(pad(name, width)) \(pad(kind, 9)) \(pad(state, 9)) \(isMain)")
     }
 
     if let builtin = firstBuiltin(ids) {
@@ -44,9 +44,8 @@ func cmdStatus() -> Int32 {
     return 0
 }
 
-func cmdOff(_ spec: String?) -> Int32 {
-    let getList: GetDisplayListFn = requireSymbol("CGSGetDisplayList")
-    let ids = enumerateDisplays(getList)
+func cmdOff(_ spec: String?) throws -> Int32 {
+    let ids = try enumerateDisplays()
 
     guard let target = resolveTarget(ids, spec) else {
         eprint(describeMissing(spec) + " Nothing to disable.")
@@ -57,11 +56,13 @@ func cmdOff(_ spec: String?) -> Int32 {
     return r.code
 }
 
-func cmdOn(_ spec: String?) -> Int32 {
-    let getList: GetDisplayListFn = requireSymbol("CGSGetDisplayList")
-    let ids = enumerateDisplays(getList)
+func cmdOn(_ spec: String?) throws -> Int32 {
+    let ids = try enumerateDisplays()
 
     guard let target = resolveTarget(ids, spec) else {
+        // The built-in is absent (lid closed), but on was asked for: forget the keep-off memory,
+        // or the menu bar app would turn the panel off again when the lid opens.
+        if spec == nil { forgetKeepOff(ids) }
         eprint(describeMissing(spec))
         if spec == nil { recoveryLadder() }
         return 2
@@ -74,14 +75,14 @@ func cmdOn(_ spec: String?) -> Int32 {
     return r.code
 }
 
-func cmdToggle(_ spec: String?) -> Int32 {
-    let getList: GetDisplayListFn = requireSymbol("CGSGetDisplayList")
-    let ids = enumerateDisplays(getList)
+func cmdToggle(_ spec: String?) throws -> Int32 {
+    let ids = try enumerateDisplays()
     guard let target = resolveTarget(ids, spec) else {
+        if spec == nil { forgetKeepOff(ids) } // an absent built-in is off, so toggle means on (see cmdOn)
         eprint(describeMissing(spec) + " Cannot toggle.")
         return 2
     }
-    return CGDisplayIsOnline(target) != 0 ? cmdOff(spec) : cmdOn(spec)
+    return CGDisplayIsOnline(target) != 0 ? try cmdOff(spec) : try cmdOn(spec)
 }
 
 func printUsage(toStderr: Bool = false) {
@@ -94,6 +95,7 @@ func printUsage(toStderr: Bool = false) {
       off [id]      Software-disconnect a display (only if another display stays active)
       on [id]       Re-enable a display (retries; prints recovery steps on failure)
       toggle [id]   Off or on depending on the display's current state
+      --version     Print the version
 
     [id] is a display id from `status`; omit it to target the built-in display.
     Offline displays are labeled in `status` with their last-seen device name.
@@ -105,14 +107,21 @@ func printUsage(toStderr: Bool = false) {
 
 let cmd = CommandLine.arguments.count >= 2 ? CommandLine.arguments[1] : ""
 let arg = CommandLine.arguments.count >= 3 ? CommandLine.arguments[2] : nil
-switch cmd {
-case "status":            exit(cmdStatus())
-case "off":               exit(cmdOff(arg))
-case "on":                exit(cmdOn(arg))
-case "toggle":            exit(cmdToggle(arg))
-case "", "-h", "--help", "help": printUsage(); exit(0)
-default:
-    eprint("Unknown command: \(cmd)\n")
-    printUsage(toStderr: true)
-    exit(2)
+do {
+    switch cmd {
+    case "status":            exit(try cmdStatus())
+    case "off":               exit(try cmdOff(arg))
+    case "on":                exit(try cmdOn(arg))
+    case "toggle":            exit(try cmdToggle(arg))
+    case "--version", "version": print("macdisplay \(version)"); exit(0)
+    case "", "-h", "--help", "help": printUsage(); exit(0)
+    default:
+        eprint("Unknown command: \(cmd)\n")
+        printUsage(toStderr: true)
+        exit(2)
+    }
+} catch {
+    let r = failure(error)
+    eprint(r.message)
+    exit(r.code)
 }

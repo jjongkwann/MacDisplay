@@ -1,0 +1,20 @@
+{
+  "title": "MacDisplay",
+  "rules": [
+    {
+      "description": "MacDisplay: control+option+command+D toggles the built-in display",
+      "manipulators": [
+        {
+          "type": "basic",
+          "from": {
+            "key_code": "d",
+            "modifiers": { "mandatory": ["control", "option", "command"] }
+          },
+          "to": [
+            { "shell_command": "/Applications/MacDisplay.app/Contents/MacOS/macdisplay toggle" }
+          ]
+        }
+      ]
+    }
+  ]
+}

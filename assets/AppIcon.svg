@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Artwork master. Regenerate the committed build input after artwork edits:
+       rsvg-convert -w 1024 -h 1024 -o assets/AppIcon.png assets/AppIcon.svg
+       Normal app builds use the PNG and only require macOS sips and iconutil. -->
+  <title>MacDisplay app icon</title>
+  <defs>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="170%"><feDropShadow dx="0" dy="16" stdDeviation="15" flood-color="#07131e" flood-opacity=".24"/></filter>
+    <linearGradient id="tile" x2=".8" y2="1"><stop stop-color="#ffdf94"/><stop offset="1" stop-color="#ed9e57"/></linearGradient>
+    <linearGradient id="screen" x2="1" y2="1"><stop stop-color="#4f3b34"/><stop offset="1" stop-color="#252b32"/></linearGradient>
+  </defs>
+  <!-- One bold screen-power control on a warm tile. -->
+  <rect x="96" y="96" width="832" height="832" rx="190" fill="url(#tile)" filter="url(#shadow)"/>
+  <rect x="98" y="98" width="828" height="828" rx="188" fill="none" stroke="#fff5d8" stroke-opacity=".5" stroke-width="4"/>
+  <path d="M482 650h60v111h-60z" fill="#5d351c"/>
+  <rect x="393" y="738" width="238" height="40" rx="20" fill="#4a2c20"/>
+  <rect x="213" y="259" width="598" height="416" rx="62" fill="#402c28" filter="url(#shadow)"/>
+  <rect x="243" y="289" width="538" height="356" rx="34" fill="url(#screen)"/>
+  <path d="M440 383a117 117 0 1 0 144 0M512 350v135" fill="none" stroke="#fff3d5" stroke-width="45" stroke-linecap="round"/>
+</svg>
